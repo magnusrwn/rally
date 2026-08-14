@@ -21,6 +21,7 @@ import json
 import os
 from collections.abc import Generator, Iterator
 from urllib.parse import urlparse
+from requests.exceptions import ChunkedEncodingError
 
 import pytest
 
@@ -57,6 +58,24 @@ class DummyClient(Client):
 
         def iter_chunks() -> Generator[bytes]:
             yield from (data,)
+
+        return GetResponse(head, iter_chunks())
+
+class ErroringDummyClient(Client):
+    def head(self, url: str, *, cache_ttl: float | None = None) -> Head:
+        return Head(url, content_length=len(DATA), accept_ranges=True, crc32c=CRC32C)
+
+    def get(self, url: str, *, check_head: Head | None = None) -> GetResponse:
+        data = DATA
+        if check_head is not None and check_head.ranges:
+            data = data[check_head.ranges.start : check_head.ranges.end]
+        head = Head(url, ranges=check_head.ranges, content_length=len(data), document_length=len(DATA), crc32c=CRC32C)
+
+        def iter_chunks() -> Generator[bytes]:
+            cut = 128
+            # chopping data at max of 128 bytes
+            yield data[:cut]
+            raise ChunkedEncodingError("connection broken")
 
         return GetResponse(head, iter_chunks())
 
@@ -244,3 +263,33 @@ def test_transfer(case: TransferCase, executor: dummy.DummyExecutor, local_dir: 
     assert transfer2.done == transfer.done
     assert transfer2.todo == transfer.todo
     assert transfer2.document_length == transfer.document_length
+
+
+
+def test_transfer_requeues_remaining_bytes_on_chunked_encoding_error(executor: dummy.DummyExecutor, tmpdir) -> None:
+    """
+    Requeues remaining bytes after a ChunkedEncodingError.
+    """
+    cfg = StorageConfig()
+    client = ErroringDummyClient.from_config(cfg)
+    path = os.path.join(
+        str(tmpdir),
+        os.path.basename(urlparse(URL).path)
+    )
+
+    transfer = Transfer(
+        client=client,
+        url=URL,
+        document_length=len(DATA),
+        path=path,
+        executor=executor,
+        crc32c=CRC32C,
+        cfg=cfg,
+    )
+    transfer.start()
+    executor.execute_tasks()
+
+    assert transfer.done == rangeset("0-127")
+    assert transfer.todo == rangeset("128-1023")
+    assert transfer.errors
+    assert isinstance(transfer.errors[0], ChunkedEncodingError)

@@ -266,7 +266,7 @@ def test_transfer(case: TransferCase, executor: dummy.DummyExecutor, local_dir: 
 
 
 
-def test_transfer_requeues_remaining_bytes_on_chunked_encoding_error(executor: dummy.DummyExecutor, tmpdir) -> None:
+def test_transfer_requeues_remaining_bytes_on_timeout_error(executor: dummy.DummyExecutor, tmpdir) -> None:
     """
     Requeues remaining bytes after a ChunkedEncodingError.
     """
